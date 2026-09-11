@@ -1,44 +1,43 @@
+// config.js
+// تمام متن‌ها و کلیدواژه‌های قابل تغییر اینجا هستند.
+// هیچ توکن یا Secretی در این فایل نگذارید.
+
 export default {
-  // هر کدام از این دو کلمه گفته شود، یک امتیاز می‌دهد.
+  // دستورهای منوی بات (setMyCommands)
+  commands: [
+    { command: "tops",  description: "برترین‌های گروه" },
+    { command: "score", description: "امتیاز من" }
+  ],
+
+  // فقط همین دو عبارت معتبرند
   keywords: [
     "ک م خ",
     "ک م م خ"
   ],
 
-  pointsPerMatch: 1,
+  // امتیاز هر پیام
+  pointsPerMessage: 1,
 
-  botStartText:
-    "👋 سلام!\n\n" +
-    "من بات امتیازدهی گروه هستم.\n" +
-    "برای استفاده، من رو به گروهت اضافه کن 👇",
+  // یوزرنیم پیش‌فرض (اگر getMe در دسترس نبود)
+  botUsername: "kmkhscorebot",
 
-  addToGroupButton: "➕ افزودن بات به گروه",
-
-  groupWelcomeText:
-    "🤖 <b>بات فعال شد!</b>\n\n" +
-    "کلمه‌های امتیازدهی:\n" +
-    "🔹 <b>{keyword1}</b>\n" +
-    "🔹 <b>{keyword2}</b>\n\n" +
-    "هر بار یکی از این دو کلمه گفته شود، یک امتیاز ثبت می‌شود ⭐\n\n" +
-    "🏆 برترین‌ها: <code>/tops</code>\n" +
-    "👤 امتیاز شما: <code>/score</code>",
-
-  scoreText:
-    "👤 <b>{name}</b>\n\n" +
-    "📅 امروز: <b>{daily}</b>\n" +
-    "📆 این هفته: <b>{weekly}</b>\n" +
-    "🏆 کل: <b>{total}</b>",
-
-  leaderboardTitle: "🏆 <b>برترین‌های گروه</b>",
-  dailyTitle: "📅 برترین‌های امروز",
-  weeklyTitle: "📆 برترین‌های این هفته",
-
-  noScoresText: "هنوز امتیازی ثبت نشده.",
-
-  medals: ["🥇", "🥈", "🥉"],
-
-  commands: {
-    tops: ["/tops", "/top", "/برترین"],
-    score: ["/score", "/امتیاز"]
+  texts: {
+    start:
+      "سلام 👋\n" +
+      "من بات ثبت امتیاز در گروه هستم.\n" +
+      "برای استفاده، مرا به گروه اضافه کنید.",
+    addToGroup: "➕ افزودن بات به گروه",
+    groupWelcome:
+      "✅ بات به گروه اضافه شد.\n" +
+      "از این پس پیام‌های دارای عبارت‌های تعیین‌شده امتیاز می‌گیرند.",
+    leaderboardTitle: "🏆 برترین‌های گروه",
+    dailyTitle: "📅 برترین‌های امروز",
+    weeklyTitle: "📆 برترین‌های این هفته",
+    noScores: "هنوز امتیازی ثبت نشده است.",
+    scoreTitle: "📊 امتیاز شما",
+    scoreToday: "امروز",
+    scoreWeek: "این هفته",
+    scoreTotal: "مجموع",
+    notGroup: "این دستور فقط در گروه‌ها کار می‌کند."
   }
 };
