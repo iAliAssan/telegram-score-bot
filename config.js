@@ -1,15 +1,18 @@
 // config.js
 // تمام متن‌ها و کلیدواژه‌های قابل تغییر اینجا هستند.
-// هیچ توکن یا Secretی در این فایل نگذارید.
+// هیچ Token یا Secretی نباید اینجا باشد.
 
 export default {
-  // دستورهای منوی بات (setMyCommands)
+  // دستورهای منوی Bot (setMyCommands)
+  // توجه: Telegram فقط commandهای ASCII را در منو می‌پذیرد.
   commands: [
     { command: "tops",  description: "برترین‌های گروه" },
     { command: "score", description: "امتیاز من" }
   ],
 
-  // فقط همین دو عبارت معتبرند
+  // فقط همین دو عبارت معتبرند. فرم canonical (با فاصله‌ی معمولی).
+  // normalizer بقیه‌ی variantها (بدون فاصله، ZWNJ، Unicode spaces) را
+  // به این فرم تبدیل می‌کند.
   keywords: [
     "ک م خ",
     "ک م م خ"
@@ -18,18 +21,25 @@ export default {
   // امتیاز هر پیام
   pointsPerMessage: 1,
 
-  // یوزرنیم پیش‌فرض (اگر getMe در دسترس نبود)
+  // اگر getMe در دسترس نبود، این fallback استفاده می‌شود.
   botUsername: "kmkhscorebot",
+
+  // Timezone (فعلاً فقط UTC پشتیبانی می‌شود تا ساده بماند)
+  timezone: "UTC",
 
   texts: {
     start:
-      "سلام 👋\n" +
-      "من بات ثبت امتیاز در گروه هستم.\n" +
-      "برای استفاده، مرا به گروه اضافه کنید.",
+      "👋 سلام!\n" +
+      "من بات امتیازدهی گروه هستم.\n" +
+      "برای استفاده، من رو به گروهت اضافه کن 👇",
     addToGroup: "➕ افزودن بات به گروه",
     groupWelcome:
       "✅ بات به گروه اضافه شد.\n" +
       "از این پس پیام‌های دارای عبارت‌های تعیین‌شده امتیاز می‌گیرند.",
+    startInGroup:
+      "🤖 بات آماده است.\n" +
+      "برای مشاهده‌ی برترین‌ها: /tops\n" +
+      "برای مشاهده‌ی امتیاز خودتان: /score",
     leaderboardTitle: "🏆 برترین‌های گروه",
     dailyTitle: "📅 برترین‌های امروز",
     weeklyTitle: "📆 برترین‌های این هفته",
@@ -38,6 +48,6 @@ export default {
     scoreToday: "امروز",
     scoreWeek: "این هفته",
     scoreTotal: "مجموع",
-    notGroup: "این دستور فقط در گروه‌ها کار می‌کند."
+    notGroup: "این دستور فقط در گروه کار می‌کند."
   }
 };
