@@ -24,7 +24,7 @@ function getSql() {
 }
 
 /* ================================================================== */
-/*  Database initialization (fast path + idempotent + race-safe)      */
+/*  Database initialization (idempotent, race-safe, cached)           */
 /* ================================================================== */
 
 let _dbInitPromise = null;
@@ -41,30 +41,6 @@ function ensureDatabase() {
 
 async function doInit() {
   const sql = getSql();
-  const t0 = Date.now();
-
-  // ---------- Fast path ----------
-  // اگر جداول از قبل ساخته شده‌اند، هیچ DDL ای اجرا نکن.
-  // این تنها یک SELECT سبک روی information_schema است.
-  try {
-    const rows = await sql`
-      SELECT
-        (SELECT COUNT(*)::int FROM information_schema.tables
-           WHERE table_schema = 'public' AND table_name = 'daily_scores') AS ds,
-        (SELECT COUNT(*)::int FROM information_schema.tables
-           WHERE table_schema = 'public' AND table_name = 'leaderboards') AS lb
-    `;
-    if (rows[0]?.ds > 0 && rows[0]?.lb > 0) {
-      console.log(`[db-init] schema exists, skip DDL (${Date.now() - t0}ms)`);
-      return;
-    }
-  } catch (e) {
-    console.warn("[db-init] fast check failed, falling back to DDL:", e?.message);
-  }
-
-  // ---------- Slow path ----------
-  console.log("[db-init] creating schema...");
-  const t1 = Date.now();
 
   await sql`
     CREATE TABLE IF NOT EXISTS public.daily_scores (
@@ -105,7 +81,7 @@ async function doInit() {
     )
   `;
 
-  console.log(`[db-init] schema created (${Date.now() - t1}ms)`);
+  console.log("[db-init] schema ready");
 }
 
 /* ================================================================== */
@@ -562,11 +538,7 @@ async function handleMessage(message) {
   if (chat.type !== "group" && chat.type !== "supergroup") return;
   if (!text) return;
 
-  // 3) یک‌بار ثبت commands کافی است؛ همین‌جا (نه در مسیر هر update)
-  try { await ensureCommands(); }
-  catch (e) { console.error("[commands]", e?.message); }
-
-  // 4) keyword
+  // 3) keyword
   const kw = findKeyword(text);
   if (!kw) {
     console.log(
@@ -575,7 +547,7 @@ async function handleMessage(message) {
     return;
   }
 
-  // 5) insert/upsert
+  // 4) insert/upsert
   const sql = getSql();
   const userName = displayName(from);
   try {
@@ -598,7 +570,7 @@ async function handleMessage(message) {
     return;
   }
 
-  // 6) امتیاز فعلی کاربر در همین گروه
+  // 5) امتیاز فعلی کاربر در همین گروه
   let currentScore = 0;
   try {
     const totalRows = await sql`
@@ -611,7 +583,7 @@ async function handleMessage(message) {
     console.error("[score] read-back failed:", e?.message);
   }
 
-  // 7) Reply به همان پیام کاربر
+  // 6) Reply به همان پیام کاربر
   try {
     const template = pickRandomScoreMessage();
     const body = renderScoreMessage(template, {
@@ -631,7 +603,7 @@ async function handleMessage(message) {
     console.error("[score-reply] failed:", e?.message);
   }
 
-  // 8) leaderboard (non-critical)
+  // 7) leaderboard (non-critical)
   try {
     await updateLeaderboard(chat.id);
   } catch (e) {
@@ -715,41 +687,15 @@ function logUpdate(update) {
 }
 
 /* ================================================================== */
-/*  processUpdate (با fast-path برای /start خصوصی)                    */
+/*  processUpdate                                                     */
 /* ================================================================== */
 
 async function processUpdate(update) {
   if (!update || typeof update !== "object") return;
 
-  const msg = update.message;
+  try { await ensureDatabase(); }
+  catch (e) { console.error("[db-init] failed:", e?.message); }
 
-  /* ---------- Fast path: private /start بدون هیچ DB ---------- */
-  if (
-    msg &&
-    msg.chat?.type === "private" &&
-    typeof msg.text === "string" &&
-    /^\/start(\s|$|@)/i.test(msg.text)
-  ) {
-    const t0 = Date.now();
-    try {
-      await handleCommand(msg);
-      console.log(`[start-private] replied in ${Date.now() - t0}ms`);
-    } catch (e) {
-      console.error("[start-private] failed:", e?.message);
-    }
-    return;
-  }
-
-  /* ---------- بقیه: DB لازم است ---------- */
-  const tDb = Date.now();
-  try {
-    await ensureDatabase();
-  } catch (e) {
-    console.error("[db-init] failed:", e?.message);
-  }
-  console.log(`[db] ensured in ${Date.now() - tDb}ms`);
-
-  // dedup
   if (typeof update.update_id === "number") {
     try {
       const sql = getSql();
@@ -768,7 +714,9 @@ async function processUpdate(update) {
     }
   }
 
-  // dispatch
+  try { await ensureCommands(); }
+  catch (e) { console.error("[commands]", e?.message); }
+
   if (update.message) {
     await handleMessage(update.message);
     return;
