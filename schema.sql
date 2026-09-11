@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS daily_scores (
 CREATE INDEX IF NOT EXISTS daily_scores_chat_day_score_idx
   ON daily_scores (chat_id, day, score DESC);
 
+CREATE INDEX IF NOT EXISTS daily_scores_chat_user_day_idx
+  ON daily_scores (chat_id, user_id, day);
+
 -- پیام Leaderboard پایدار هر گروه
 CREATE TABLE IF NOT EXISTS leaderboards (
   chat_id    BIGINT      PRIMARY KEY,
