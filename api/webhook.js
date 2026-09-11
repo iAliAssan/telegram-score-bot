@@ -2,16 +2,16 @@
 import { neon } from "@neondatabase/serverless";
 import cfg from "../config.js";
 
-/* ------------------------------------------------------------------ */
-/*  ENV                                                                */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  ENV                                                               */
+/* ================================================================== */
 
 const BOT_TOKEN    = process.env.BOT_TOKEN    || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 
-/* ------------------------------------------------------------------ */
-/*  Neon client (lazy)                                                 */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Neon client (lazy, cached per container)                          */
+/* ================================================================== */
 
 let _sql = null;
 function sql() {
@@ -21,9 +21,9 @@ function sql() {
   return _sql;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Telegram API helper                                                */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Telegram API                                                      */
+/* ================================================================== */
 
 async function tg(method, payload) {
   if (!BOT_TOKEN) throw new Error("BOT_TOKEN is not set");
@@ -33,88 +33,109 @@ async function tg(method, payload) {
     body: JSON.stringify(payload || {})
   });
   let data;
-  try { data = await res.json(); }
-  catch { data = { ok: false, description: "invalid-json" }; }
+  try {
+    data = await res.json();
+  } catch {
+    data = { ok: false, description: "invalid-json-from-telegram" };
+  }
   if (!data.ok) {
+    // هیچ توکنی log نمی‌شود، فقط description
     console.warn(`[tg] ${method} failed: ${data.description || res.status}`);
   }
   return data;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Text normalization & keyword matching                              */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Text normalization                                                */
+/* ================================================================== */
 
-function normalizeText(text) {
-  if (!text) return "";
+function normalize(text) {
+  if (text == null) return "";
   return String(text)
-    // space-like → " "
-    .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, " ")
-    // zero-width + directional marks → remove
-    .replace(/[\u200C\u200D\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
-    // collapse whitespace
-    .replace(/\s+/g, " ")
+    // 1) حذف zero-width / bidi marks
+    .replace(/[\u200B\u200C\u200D\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
+    // 2) تبدیل تمام فضای‌های Unicode به space معمولی
+    .replace(/[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+/g, " ")
+    // 3) یکسان‌سازی حروف عربی با فارسی (ک و ی)
+    .replace(/\u0643/g, "\u06A9") // ك → ک
+    .replace(/\u064A/g, "\u06CC") // ي → ی
     .trim();
 }
 
-const NORMALIZED_KEYWORDS = cfg.keywords.map(normalizeText).filter(Boolean);
+const NORMALIZED_KEYWORDS = cfg.keywords
+  .map((kw) => normalize(kw))
+  .filter(Boolean)
+  .map((spaced) => ({
+    spaced,
+    compact: spaced.replace(/ /g, "")
+  }));
 
 function matchesKeyword(text) {
-  const t = normalizeText(text);
-  if (!t) return null;
+  const n = normalize(text);
+  if (!n) return null;
+  const c = n.replace(/ /g, "");
   for (const kw of NORMALIZED_KEYWORDS) {
-    if (t.includes(kw)) return kw;
+    if (n.includes(kw.spaced) || c.includes(kw.compact)) {
+      return kw.spaced;
+    }
   }
   return null;
 }
 
-/* ------------------------------------------------------------------ */
-/*  HTML escape                                                        */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Helpers                                                           */
+/* ================================================================== */
 
-function esc(s) {
-  return String(s ?? "")
+function esc(v) {
+  return String(v ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Dates (UTC)                                                        */
-/* ------------------------------------------------------------------ */
-
 function todayUTC() {
-  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  return new Date().toISOString().slice(0, 10);
 }
 
 function weekStartUTC() {
   const now = new Date();
-  const dow = now.getUTCDay();               // 0=Sun..6=Sat
-  const diff = dow === 0 ? 6 : dow - 1;      // Monday = start
-  const mon = new Date(Date.UTC(
+  const dow = now.getUTCDay();                // 0=Sun..6=Sat
+  const diff = dow === 0 ? 6 : dow - 1;       // Monday = start
+  const d = new Date(Date.UTC(
     now.getUTCFullYear(),
     now.getUTCMonth(),
     now.getUTCDate() - diff
   ));
-  return mon.toISOString().slice(0, 10);
+  return d.toISOString().slice(0, 10);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Bot username (cached per container)                                */
-/* ------------------------------------------------------------------ */
+function displayName(from) {
+  if (!from) return "?";
+  const parts = [from.first_name, from.last_name].filter(Boolean);
+  if (parts.length) return parts.join(" ");
+  if (from.username) return "@" + from.username;
+  return String(from.id);
+}
+
+/* ================================================================== */
+/*  Bot username / setMyCommands                                      */
+/* ================================================================== */
 
 let _botUsername = null;
 async function getBotUsername() {
   if (_botUsername) return _botUsername;
-  const r = await tg("getMe", {});
-  if (r.ok && r.result?.username) _botUsername = r.result.username;
-  return _botUsername || cfg.botUsername;
+  try {
+    const r = await tg("getMe", {});
+    if (r.ok && r.result?.username) {
+      _botUsername = r.result.username;
+      return _botUsername;
+    }
+  } catch (e) {
+    console.error("[getMe]", e?.message);
+  }
+  return cfg.botUsername;
 }
-
-/* ------------------------------------------------------------------ */
-/*  setMyCommands (once per container)                                 */
-/* ------------------------------------------------------------------ */
 
 let _commandsSet = false;
 async function ensureCommands() {
@@ -127,20 +148,9 @@ async function ensureCommands() {
   }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Display name                                                       */
-/* ------------------------------------------------------------------ */
-
-function displayName(from) {
-  const parts = [from?.first_name, from?.last_name].filter(Boolean);
-  if (parts.length) return parts.join(" ");
-  if (from?.username) return "@" + from.username;
-  return String(from?.id ?? "?");
-}
-
-/* ------------------------------------------------------------------ */
-/*  Leaderboard rendering                                              */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Leaderboard                                                       */
+/* ================================================================== */
 
 const MEDALS = ["🥇", "🥈", "🥉"];
 
@@ -184,12 +194,9 @@ async function fetchLeaderboardRows(chatId) {
     ORDER BY score DESC, user_id ASC
     LIMIT 3
   `;
+  // توجه: neon serverless نتیجه را مستقیماً Array برمی‌گرداند
   return { daily, weekly };
 }
-
-/* ------------------------------------------------------------------ */
-/*  Persistent leaderboard message                                     */
-/* ------------------------------------------------------------------ */
 
 async function sendAndStoreLeaderboard(chatId, text) {
   const r = await tg("sendMessage", {
@@ -210,15 +217,27 @@ async function sendAndStoreLeaderboard(chatId, text) {
 }
 
 async function updateLeaderboard(chatId) {
-  const { daily, weekly } = await fetchLeaderboardRows(chatId);
+  let daily, weekly;
+  try {
+    ({ daily, weekly } = await fetchLeaderboardRows(chatId));
+  } catch (e) {
+    console.error("[leaderboard] fetch failed:", e?.message);
+    return;
+  }
   const text = formatLeaderboard(daily, weekly);
 
   const db = sql();
-  const existing = await db`
-    SELECT message_id FROM leaderboards WHERE chat_id = ${chatId}
-  `;
+  let existing;
+  try {
+    existing = await db`
+      SELECT message_id FROM leaderboards WHERE chat_id = ${chatId}
+    `;
+  } catch (e) {
+    console.error("[leaderboard] lookup failed:", e?.message);
+    return;
+  }
 
-  if (existing.length === 0) {
+  if (!existing.length) {
     await sendAndStoreLeaderboard(chatId, text);
     return;
   }
@@ -231,17 +250,29 @@ async function updateLeaderboard(chatId) {
     parse_mode: "HTML",
     disable_web_page_preview: true
   });
+
   if (r.ok) return;
 
   const desc = String(r.description || "").toLowerCase();
-  if (desc.includes("not modified")) return; // محتوای یکسان
-  // پیام قبلی پاک شده یا قابل ویرایش نیست → ارسال جدید
-  await sendAndStoreLeaderboard(chatId, text);
+  if (desc.includes("not modified")) return;
+
+  // پیام حذف شده یا قابل ویرایش نیست → ارسال جدید
+  if (
+    desc.includes("message to edit not found") ||
+    desc.includes("message can't be edited") ||
+    desc.includes("message_id_invalid") ||
+    desc.includes("chat not found")
+  ) {
+    await sendAndStoreLeaderboard(chatId, text);
+    return;
+  }
+
+  console.warn(`[leaderboard] edit failed unexpectedly: ${r.description}`);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Commands                                                           */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Commands                                                          */
+/* ================================================================== */
 
 async function replyTops(chatId, replyTo) {
   const { daily, weekly } = await fetchLeaderboardRows(chatId);
@@ -297,9 +328,9 @@ async function replyScore(chatId, from, replyTo) {
   });
 }
 
-/* ------------------------------------------------------------------ */
-/*  Message handler                                                    */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Command parsing                                                   */
+/* ================================================================== */
 
 async function handleCommand(message) {
   const text = typeof message.text === "string" ? message.text : "";
@@ -307,17 +338,22 @@ async function handleCommand(message) {
   const from = message.from;
   if (!chat || !from) return false;
 
+  // اولین توکن قبل از هر whitespace
   const first = text.split(/\s+/)[0] || "";
-  const m = first.match(/^\/([^\s@]+)(?:@(\S+))?/);
+  // /cmd یا /cmd@username
+  const m = first.match(/^\/([^\s@]+)(?:@(\S+))?$/);
   if (!m) return false;
 
   const cmd = m[1].toLowerCase();
   const target = m[2];
 
-  // /cmd@OtherBot → ignore
+  // اگر @username برای بات دیگری است → ignore
   if (target) {
     const me = await getBotUsername();
-    if (me && target.toLowerCase() !== me.toLowerCase()) return true;
+    if (me && target.toLowerCase() !== me.toLowerCase()) {
+      console.log(`[command] ignored for other bot: @${target}`);
+      return true;
+    }
   }
 
   /* ---------- /start ---------- */
@@ -332,6 +368,12 @@ async function handleCommand(message) {
         reply_markup: {
           inline_keyboard: [[{ text: cfg.texts.addToGroup, url }]]
         }
+      });
+    } else if (chat.type === "group" || chat.type === "supergroup") {
+      await tg("sendMessage", {
+        chat_id: chat.id,
+        text: cfg.texts.startInGroup,
+        disable_web_page_preview: true
       });
     }
     return true;
@@ -360,30 +402,40 @@ async function handleCommand(message) {
   return false;
 }
 
+/* ================================================================== */
+/*  Message handler                                                   */
+/* ================================================================== */
+
 async function handleMessage(message) {
   const chat = message.chat;
   const from = message.from;
-  const text = typeof message.text === "string" ? message.text : "";
-
   if (!chat || !from) return;
   if (from.is_bot) return;
 
-  // دستورات
+  const text = typeof message.text === "string" ? message.text : "";
+
+  // 1) دستورات — هم در private و هم در گروه
   if (text.startsWith("/")) {
-    const handled = await handleCommand(message);
-    if (handled) return;
+    try {
+      const handled = await handleCommand(message);
+      if (handled) return;
+    } catch (e) {
+      console.error("[command] failed:", e?.message);
+      return;
+    }
   }
 
-  // امتیاز فقط در گروه / سوپرگروه
+  // 2) امتیاز فقط در گروه / سوپرگروه
   if (chat.type !== "group" && chat.type !== "supergroup") return;
   if (!text) return;
 
+  // 3) keyword matching
   const kw = matchesKeyword(text);
   if (!kw) return;
 
+  // 4) insert / upsert
   const db = sql();
   const userName = displayName(from);
-
   try {
     await db`
       INSERT INTO daily_scores (chat_id, user_id, user_name, day, score)
@@ -392,19 +444,27 @@ async function handleMessage(message) {
       DO UPDATE SET score     = daily_scores.score + ${cfg.pointsPerMessage},
                     user_name = EXCLUDED.user_name
     `;
+    console.log(
+      `[score] +${cfg.pointsPerMessage} chat=${chat.id} user=${from.id} kw="${kw}"`
+    );
   } catch (e) {
     console.error("[score] insert failed:", e?.message);
-    return;
+    // اجازه بده به لایه‌ی بالا برسد تا dedup پاک شود و Telegram retry کند
+    throw e;
   }
 
-  console.log(`[score] chat=${chat.id} user=${from.id} kw="${kw}"`);
-
+  // 5) leaderboard
   try {
     await updateLeaderboard(chat.id);
   } catch (e) {
     console.error("[leaderboard] update failed:", e?.message);
+    // leaderboard خطا نگیرد کل update را retry نمی‌کنیم
   }
 }
+
+/* ================================================================== */
+/*  my_chat_member                                                    */
+/* ================================================================== */
 
 async function handleMyChatMember(upd) {
   const chat = upd.chat;
@@ -435,61 +495,143 @@ async function handleMyChatMember(upd) {
   }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Main webhook handler                                               */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Logging helper                                                    */
+/* ================================================================== */
+
+function logUpdate(update) {
+  const type =
+    update.message ? "message" :
+    update.my_chat_member ? "my_chat_member" :
+    update.callback_query ? "callback_query" :
+    update.edited_message ? "edited_message" :
+    "other";
+
+  const chatType =
+    update.message?.chat?.type ||
+    update.my_chat_member?.chat?.type ||
+    null;
+
+  const chatId =
+    update.message?.chat?.id ||
+    update.my_chat_member?.chat?.id ||
+    null;
+
+  const userId =
+    update.message?.from?.id ||
+    update.my_chat_member?.from?.id ||
+    null;
+
+  const text =
+    typeof update.message?.text === "string"
+      ? update.message.text.slice(0, 80)
+      : undefined;
+
+  console.log("[UPDATE]", JSON.stringify({
+    update_id: update.update_id,
+    type,
+    chat_type: chatType,
+    chat_id: chatId,
+    user_id: userId,
+    text
+  }));
+}
+
+/* ================================================================== */
+/*  processUpdate                                                     */
+/* ================================================================== */
 
 async function processUpdate(update) {
   if (!update || typeof update !== "object") return;
 
-  // ---------- dedup ----------
+  // ---- dedup ----
+  // اگر insert موفق شد => پردازش
+  // اگر conflict خورد => skip
+  // در صورت خطا در ادامه، dedup پاک می‌شود تا Telegram retry کند.
+  let insertedId = null;
   if (typeof update.update_id === "number") {
-    const db = sql();
-    const inserted = await db`
-      INSERT INTO processed_updates (update_id)
-      VALUES (${update.update_id})
-      ON CONFLICT (update_id) DO NOTHING
-      RETURNING update_id
-    `;
-    if (inserted.length === 0) {
-      console.log(`[dedup] skip update_id=${update.update_id}`);
-      return;
+    try {
+      const db = sql();
+      const rows = await db`
+        INSERT INTO processed_updates (update_id)
+        VALUES (${update.update_id})
+        ON CONFLICT (update_id) DO NOTHING
+        RETURNING update_id
+      `;
+      if (rows.length === 0) {
+        console.log(`[dedup] skip update_id=${update.update_id}`);
+        return;
+      }
+      insertedId = update.update_id;
+    } catch (e) {
+      console.error("[dedup] insert failed:", e?.message);
+      // بدون dedup ادامه نمی‌دهیم؛ اجازه بده Telegram retry کند
+      throw e;
     }
   }
 
-  // ---------- register commands (once/container) ----------
-  try { await ensureCommands(); } catch (e) { console.error("[ensureCommands]", e?.message); }
+  try {
+    // register commands (idempotent, per container)
+    try { await ensureCommands(); }
+    catch (e) { console.error("[ensureCommands]", e?.message); }
 
-  if (update.message)          return handleMessage(update.message);
-  if (update.my_chat_member)   return handleMyChatMember(update.my_chat_member);
-  // بقیه انواع Update نادیده گرفته می‌شوند
+    if (update.message)        { await handleMessage(update.message);        return; }
+    if (update.my_chat_member) { await handleMyChatMember(update.my_chat_member); return; }
+    // بقیه انواع Update نادیده گرفته می‌شوند
+  } catch (e) {
+    // خطا → dedup را پاک کن تا Telegram retry کند
+    if (insertedId != null) {
+      try {
+        const db = sql();
+        await db`DELETE FROM processed_updates WHERE update_id = ${insertedId}`;
+        console.warn(`[dedup] rolled back update_id=${insertedId}`);
+      } catch (e2) {
+        console.error("[dedup] rollback failed:", e2?.message);
+      }
+    }
+    throw e;
+  }
 }
+
+/* ================================================================== */
+/*  HTTP handler                                                      */
+/* ================================================================== */
 
 export default async function handler(req, res) {
   // health check
   if (req.method !== "POST") {
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true, service: "telegram-score-bot" });
   }
 
   if (!BOT_TOKEN || !DATABASE_URL) {
-    console.error("[env] BOT_TOKEN or DATABASE_URL missing");
+    console.error("[env] missing BOT_TOKEN or DATABASE_URL");
+    // به Telegram بگو موفق بود تا retry بی‌فایده نکند
     return res.status(200).json({ ok: true });
   }
 
-  // parse body
+  // parse body (Vercel معمولاً object می‌دهد، ولی هر دو حالت را پوشش می‌دهیم)
   let update = null;
   try {
     update = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || null);
   } catch (e) {
-    console.error("[body] JSON parse error:", e?.message);
+    console.error("[webhook] body parse error:", e?.message);
     return res.status(200).json({ ok: true });
   }
 
-  // IMPORTANT: await processing BEFORE returning.
+  if (!update) {
+    return res.status(200).json({ ok: true });
+  }
+
+  // Log
+  try { logUpdate(update); } catch (e) { console.error("[logUpdate]", e?.message); }
+
+  // IMPORTANT: پردازش را کامل await کن، بعد پاسخ بده
   try {
     await processUpdate(update);
   } catch (e) {
-    console.error("[process] fatal:", e?.message, e?.stack);
+    console.error("[webhook] fatal:", e?.message, e?.stack);
+    // 500 می‌دهیم تا Telegram retry کند (چون dedup هم rollback شده)
+    return res.status(500).json({ ok: false });
   }
 
   return res.status(200).json({ ok: true });
