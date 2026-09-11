@@ -1,5 +1,7 @@
 import CONFIG from "../config.js";
-import { sql } from "@vercel/postgres";
+import { neon } from "@neondatabase/serverless";
+
+const sql = neon(process.env.DATABASE_URL);
 
 const TG = (method) => `https://api.telegram.org/bot${process.env.BOT_TOKEN}/${method}`;
 
