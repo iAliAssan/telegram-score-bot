@@ -4,22 +4,25 @@
 
 export default {
   // دستورهای منوی Bot (setMyCommands)
-  // توجه: Telegram فقط commandهای ASCII را در منو می‌پذیرد.
-  // نسخه‌های فارسی (/برترین /امتیاز) توسط کد پشتیبانی می‌شوند
-  // ولی در منوی خودکار Telegram نمایش داده نمی‌شوند.
+  // توجه: Telegram فقط commandهای ASCII را در منو می‌پذیرد،
+  // ولی نسخه‌های فارسی (/برترین /امتیاز) هم توسط کد پشتیبانی می‌شوند.
   commands: [
     { command: "tops",  description: "برترین‌های گروه" },
     { command: "score", description: "امتیاز من" }
   ],
 
-  // فرم canonical (با فاصله معمولی).
-  // normalizer بقیه variantها (چسبیده، ZWNJ، NBSP، Unicode spaces) را
-  // به این فرم تبدیل می‌کند.
+  // کلیدواژه‌ها با فرم canonical (چسبیده، بدون فاصله، بدون ZWNJ).
+  // ماژول webhook از canonical، دو فرم مشتق می‌سازد:
+  //   spaced  = "ک م خ"  (حروف با فاصله معمولی)
+  //   compact = "کمخ"
+  // سپس هر دو فرم spaced و compact (و معادل‌هایشان با ZWNJ/NBSP)
+  // در متن normalize شده چک می‌شوند.
   keywords: [
-    "ک م خ",
-    "ک م م خ"
+    { canonical: "کمخ",  points: 1 },
+    { canonical: "کممخ", points: 1 }
   ],
 
+  // امتیاز پیش‌فرض برای هر پیام (اگر points در keyword مشخص نشده باشد)
   pointsPerMessage: 1,
 
   // fallback اگر getMe در دسترس نبود
