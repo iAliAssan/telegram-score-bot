@@ -32,7 +32,6 @@ let _dbInitPromise = null;
 function ensureDatabase() {
   if (!_dbInitPromise) {
     _dbInitPromise = doInit().catch((err) => {
-      // اجازه بده درخواست بعدی دوباره تلاش کند
       _dbInitPromise = null;
       throw err;
     });
@@ -43,7 +42,6 @@ function ensureDatabase() {
 async function doInit() {
   const sql = getSql();
 
-  // --- daily_scores ---
   await sql`
     CREATE TABLE IF NOT EXISTS public.daily_scores (
       chat_id    BIGINT      NOT NULL,
@@ -67,7 +65,6 @@ async function doInit() {
       ON public.daily_scores (chat_id, user_id, day)
   `;
 
-  // --- leaderboards ---
   await sql`
     CREATE TABLE IF NOT EXISTS public.leaderboards (
       chat_id    BIGINT      PRIMARY KEY,
@@ -76,9 +73,7 @@ async function doInit() {
     )
   `;
 
-  // --- processed_updates ---
-  // کاربر گفته این جدول از قبل وجود دارد. با IF NOT EXISTS،
-  // اگر موجود باشد no-op است و هیچ داده‌ای دست نمی‌خورد.
+  // اگر جدول موجود باشد، no-op است و هیچ داده‌ای دست نمی‌خورد.
   await sql`
     CREATE TABLE IF NOT EXISTS public.processed_updates (
       update_id    BIGINT      PRIMARY KEY,
@@ -119,26 +114,16 @@ async function tg(method, payload) {
 /*  Normalization & keyword matching                                  */
 /* ================================================================== */
 
-// normalizeForMatch:
-//   1) ك عربی → ک فارسی، ي عربی → ی فارسی
-//   2) حذف ZWNJ/ZWJ/ZWSP/LRM/RLM/BOM
-//   3) تمام فاصله‌های Unicode (NBSP, thin space, ...) → space معمولی
-//   4) collapse multiple spaces و trim
-//
-// نتیجه: "ک‌م‌خ" و "کمخ" هر دو → "کمخ"
-//         "ک م خ" → "ک م خ" (بدون تغییر، چون space معمولی است)
-//         "کم خ" → "کم خ" (space بین م و خ باقی می‌ماند)
 function normalizeForMatch(input) {
   if (input == null) return "";
   return String(input)
-    .replace(/\u0643/g, "\u06A9") // Arabic kaf → Persian kaf
-    .replace(/\u064A/g, "\u06CC") // Arabic yeh → Persian yeh
+    .replace(/\u0643/g, "\u06A9") // ك → ک
+    .replace(/\u064A/g, "\u06CC") // ي → ی
     .replace(/[\u200B\u200C\u200D\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
     .replace(/[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+/g, " ")
     .trim();
 }
 
-// از config، فرم‌های spaced و compact را می‌سازیم.
 const NORMALIZED_KEYWORDS = cfg.keywords
   .map((entry) => {
     const canonical = normalizeForMatch(entry.canonical ?? entry).replace(/\s+/g, "");
@@ -151,28 +136,40 @@ const NORMALIZED_KEYWORDS = cfg.keywords
   })
   .filter(Boolean);
 
-/**
- * اگر پیام شامل یکی از دو فرم spaced یا compact باشد، آن keyword را برمی‌گرداند.
- * منطق:
- *   - "ک م خ"  → spaced "ک م خ" match → ✓
- *   - "کمخ"    → compact "کمخ" match → ✓
- *   - "ک‌م‌خ"   → normalize → "کمخ" → compact match → ✓
- *   - "کم خ"   → نه spaced نه compact → ✗
- *   - "خ م ک"  → نه spaced نه compact → ✗
- *   - "کمح"    → نه spaced نه compact → ✗
- *   - "ک_م_خ"  → underscore حذف نمی‌شود، پس نه spaced نه compact → ✗
- *   - "ک م ک"  → نه spaced نه compact → ✗
- *   - "ک م م"  → نه spaced نه compact (keyword2 "ک م م خ" نیاز به خ دارد) → ✗
- */
 function findKeyword(rawText) {
   const text = normalizeForMatch(rawText);
   if (!text) return null;
   for (const kw of NORMALIZED_KEYWORDS) {
-    if (text.includes(kw.spaced) || text.includes(kw.compact)) {
-      return kw;
-    }
+    if (text.includes(kw.spaced) || text.includes(kw.compact)) return kw;
   }
   return null;
+}
+
+/* ================================================================== */
+/*  Score message picker (per-container anti-repeat)                  */
+/* ================================================================== */
+
+let _lastScoreMsgIdx = -1;
+
+function pickRandomScoreMessage() {
+  const list = cfg.scoreMessages || [];
+  const n = list.length;
+  if (n === 0) return "";
+  if (n === 1) return list[0];
+  let idx;
+  do {
+    idx = Math.floor(Math.random() * n);
+  } while (idx === _lastScoreMsgIdx);
+  _lastScoreMsgIdx = idx;
+  return list[idx];
+}
+
+function renderScoreMessage(template, vars) {
+  return String(template)
+    .replace(/\{user\}/g,    String(vars.user))
+    .replace(/\{keyword\}/g, String(vars.keyword))
+    .replace(/\{points\}/g,  String(vars.points))
+    .replace(/\{score\}/g,   String(vars.score));
 }
 
 /* ================================================================== */
@@ -242,35 +239,51 @@ async function ensureCommands() {
 }
 
 /* ================================================================== */
-/*  Leaderboard                                                       */
+/*  Leaderboard formatting                                            */
 /* ================================================================== */
 
 const MEDALS = ["🥇", "🥈", "🥉"];
 
 function formatLeaderboard(daily, weekly) {
-  let out = `<b>${esc(cfg.texts.leaderboardTitle)}</b>\n\n`;
-  out += `<b>${esc(cfg.texts.dailyTitle)}</b>\n`;
+  const T = cfg.texts;
+
+  if (!daily.length && !weekly.length) {
+    return [
+      `<b>${esc(T.leaderboardTitle)}</b>`,
+      ``,
+      esc(T.noScores),
+      `اولین امتیاز را ثبت کن. ✊`,
+      ``,
+      esc(T.emptyLeaderboardFooter)
+    ].join("\n");
+  }
+
+  const lines = [`<b>${esc(T.leaderboardTitle)}</b>`, ``];
+  lines.push(`<b>${esc(T.dailyTitle)}</b>`);
   if (!daily.length) {
-    out += esc(cfg.texts.noScores) + "\n";
+    lines.push(esc(T.noScores));
   } else {
     daily.forEach((r, i) => {
-      out += `${MEDALS[i]} ${esc(r.user_name)} — ${r.score}\n`;
+      lines.push(`${MEDALS[i]} ${esc(r.user_name)} — ${r.score}`);
     });
   }
-  out += `\n<b>${esc(cfg.texts.weeklyTitle)}</b>\n`;
+
+  lines.push(``, `━━━━━━━━━━━━`, ``);
+  lines.push(`<b>${esc(T.weeklyTitle)}</b>`);
   if (!weekly.length) {
-    out += esc(cfg.texts.noScores) + "\n";
+    lines.push(esc(T.noScores));
   } else {
     weekly.forEach((r, i) => {
-      out += `${MEDALS[i]} ${esc(r.user_name)} — ${r.score}\n`;
+      lines.push(`${MEDALS[i]} ${esc(r.user_name)} — ${r.score}`);
     });
   }
-  return out.trim();
+
+  lines.push(``, esc(T.leaderboardFooter));
+  return lines.join("\n");
 }
 
 async function fetchLeaderboardRows(chatId) {
   const sql = getSql();
-  // neon serverless نتیجه را مستقیماً Array برمی‌گرداند
   const daily = await sql`
     SELECT user_name, score
     FROM public.daily_scores
@@ -363,7 +376,7 @@ async function updateLeaderboard(chatId) {
 }
 
 /* ================================================================== */
-/*  Command handlers                                                  */
+/*  /tops and /score replies                                          */
 /* ================================================================== */
 
 async function replyTops(chatId, replyTo) {
@@ -405,20 +418,31 @@ async function replyScore(chatId, from, replyTo) {
   const week  = weekRows[0]?.score  ?? 0;
   const total = totalRows[0]?.score ?? 0;
 
-  const text =
-    `<b>${esc(cfg.texts.scoreTitle)}</b> — ${esc(displayName(from))}\n` +
-    `${esc(cfg.texts.scoreToday)}: <b>${today}</b>\n` +
-    `${esc(cfg.texts.scoreWeek)}: <b>${week}</b>\n` +
-    `${esc(cfg.texts.scoreTotal)}: <b>${total}</b>`;
+  const T = cfg.texts;
+  const lines = [
+    `<b>${esc(T.scoreTitle)}</b> ${esc(displayName(from))}`,
+    ``,
+    `${esc(T.scoreToday)}: <b>${today}</b>`,
+    `${esc(T.scoreWeek)}: <b>${week}</b>`,
+    `${esc(T.scoreTotal)}: <b>${total}</b>`,
+    ``,
+    esc(T.scoreFooter)
+  ];
+  const text = lines.join("\n");
 
   await tg("sendMessage", {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
     reply_to_message_id: replyTo,
-    allow_sending_without_reply: true
+    allow_sending_without_reply: true,
+    disable_web_page_preview: true
   });
 }
+
+/* ================================================================== */
+/*  Commands                                                          */
+/* ================================================================== */
 
 async function handleCommand(message) {
   const text = typeof message.text === "string" ? message.text : "";
@@ -427,14 +451,12 @@ async function handleCommand(message) {
   if (!chat || !from) return false;
 
   const first = text.split(/\s+/)[0] || "";
-  // پشتیبانی /cmd و /cmd@username و /برترین
   const m = first.match(/^\/([a-zA-Z0-9_\u0600-\u06FF]+)(?:@([a-zA-Z0-9_]+))?/);
   if (!m) return false;
 
   const cmd = m[1].toLowerCase();
   const target = m[2];
 
-  // اگر @username برای بات دیگری است → ignore
   if (target) {
     const me = await getBotUsername();
     if (me && target.toLowerCase() !== me.toLowerCase()) {
@@ -501,7 +523,7 @@ async function handleMessage(message) {
 
   const text = typeof message.text === "string" ? message.text : "";
 
-  // 1) دستورات — هم private و هم گروه
+  // 1) commandها
   if (text.startsWith("/")) {
     try {
       const handled = await handleCommand(message);
@@ -512,11 +534,11 @@ async function handleMessage(message) {
     }
   }
 
-  // 2) امتیاز فقط در گروه / سوپرگروه
+  // 2) امتیاز فقط در گروه
   if (chat.type !== "group" && chat.type !== "supergroup") return;
   if (!text) return;
 
-  // 3) keyword matching
+  // 3) keyword
   const kw = findKeyword(text);
   if (!kw) {
     console.log(
@@ -548,7 +570,40 @@ async function handleMessage(message) {
     return;
   }
 
-  // 5) leaderboard (non-critical)
+  // 5) امتیاز فعلی کاربر در همین گروه
+  let currentScore = 0;
+  try {
+    const totalRows = await sql`
+      SELECT COALESCE(SUM(score), 0)::int AS score
+      FROM public.daily_scores
+      WHERE chat_id = ${chat.id} AND user_id = ${from.id}
+    `;
+    currentScore = totalRows[0]?.score ?? 0;
+  } catch (e) {
+    console.error("[score] read-back failed:", e?.message);
+  }
+
+  // 6) Reply به همان پیام کاربر
+  try {
+    const template = pickRandomScoreMessage();
+    const body = renderScoreMessage(template, {
+      user:    userName,
+      keyword: kw.compact,
+      points:  kw.points,
+      score:   currentScore
+    });
+    await tg("sendMessage", {
+      chat_id: chat.id,
+      text: body,
+      reply_to_message_id: message.message_id,
+      allow_sending_without_reply: true,
+      disable_web_page_preview: true
+    });
+  } catch (e) {
+    console.error("[score-reply] failed:", e?.message);
+  }
+
+  // 7) leaderboard (non-critical)
   try {
     await updateLeaderboard(chat.id);
   } catch (e) {
@@ -638,15 +693,9 @@ function logUpdate(update) {
 async function processUpdate(update) {
   if (!update || typeof update !== "object") return;
 
-  // ---- 1) اطمینان از وجود جداول ----
-  try {
-    await ensureDatabase();
-  } catch (e) {
-    console.error("[db-init] failed:", e?.message);
-    // ادامه می‌دهیم؛ ممکن است فقط یک DDL شکست خورده باشد
-  }
+  try { await ensureDatabase(); }
+  catch (e) { console.error("[db-init] failed:", e?.message); }
 
-  // ---- 2) dedup ----
   if (typeof update.update_id === "number") {
     try {
       const sql = getSql();
@@ -665,11 +714,9 @@ async function processUpdate(update) {
     }
   }
 
-  // ---- 3) register commands ----
   try { await ensureCommands(); }
   catch (e) { console.error("[commands]", e?.message); }
 
-  // ---- 4) dispatch ----
   if (update.message) {
     await handleMessage(update.message);
     return;
@@ -678,7 +725,6 @@ async function processUpdate(update) {
     await handleMyChatMember(update.my_chat_member);
     return;
   }
-  // بقیه انواع Update نادیده گرفته می‌شوند
 }
 
 /* ================================================================== */
@@ -686,18 +732,15 @@ async function processUpdate(update) {
 /* ================================================================== */
 
 export default async function handler(req, res) {
-  // health check
   if (req.method !== "POST") {
     return res.status(200).json({ ok: true, service: "telegram-score-bot" });
   }
 
   if (!BOT_TOKEN || !DATABASE_URL) {
     console.error("[webhook] missing env vars (BOT_TOKEN or DATABASE_URL)");
-    // 200 می‌دهیم تا Telegram retry بی‌فایده نکند
     return res.status(200).json({ ok: true });
   }
 
-  // parse body
   let update = null;
   try {
     update = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || null);
@@ -706,15 +749,11 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
-  if (!update) {
-    return res.status(200).json({ ok: true });
-  }
+  if (!update) return res.status(200).json({ ok: true });
 
   try { logUpdate(update); }
   catch (e) { console.error("[logUpdate]", e?.message); }
 
-  // IMPORTANT: پردازش را کامل await کن، سپس 200 برگردان.
-  // حتی در صورت خطا، 200 برمی‌گردانیم تا Telegram retry نکند.
   try {
     await processUpdate(update);
   } catch (e) {
