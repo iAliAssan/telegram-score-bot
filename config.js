@@ -5,27 +5,25 @@
 export default {
   // دستورهای منوی Bot (setMyCommands)
   // توجه: Telegram فقط commandهای ASCII را در منو می‌پذیرد.
+  // نسخه‌های فارسی (/برترین /امتیاز) توسط کد پشتیبانی می‌شوند
+  // ولی در منوی خودکار Telegram نمایش داده نمی‌شوند.
   commands: [
     { command: "tops",  description: "برترین‌های گروه" },
     { command: "score", description: "امتیاز من" }
   ],
 
-  // فقط همین دو عبارت معتبرند. فرم canonical (با فاصله‌ی معمولی).
-  // normalizer بقیه‌ی variantها (بدون فاصله، ZWNJ، Unicode spaces) را
+  // فرم canonical (با فاصله معمولی).
+  // normalizer بقیه variantها (چسبیده، ZWNJ، NBSP، Unicode spaces) را
   // به این فرم تبدیل می‌کند.
   keywords: [
     "ک م خ",
     "ک م م خ"
   ],
 
-  // امتیاز هر پیام
   pointsPerMessage: 1,
 
-  // اگر getMe در دسترس نبود، این fallback استفاده می‌شود.
+  // fallback اگر getMe در دسترس نبود
   botUsername: "kmkhscorebot",
-
-  // Timezone (فعلاً فقط UTC پشتیبانی می‌شود تا ساده بماند)
-  timezone: "UTC",
 
   texts: {
     start:
