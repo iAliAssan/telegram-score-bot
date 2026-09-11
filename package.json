@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vercel dev"
   },
-  "dependencies": {
-    "@vercel/postgres": "latest"
-  }
+"dependencies": {
+  "@neondatabase/serverless": "latest"
 }
+  }
