@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "dev": "vercel dev"
+  "engines": {
+    "node": "20.x"
   },
-"dependencies": {
-  "@neondatabase/serverless": "latest"
-}
+  "dependencies": {
+    "@neondatabase/serverless": "^0.10.4"
   }
+}
