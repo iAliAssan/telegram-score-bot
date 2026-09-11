@@ -10,7 +10,7 @@ const BOT_TOKEN    = process.env.BOT_TOKEN    || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 
 /* ================================================================== */
-/*  Neon client (lazy, cached per container)                          */
+/*  Neon client (lazy)                                                */
 /* ================================================================== */
 
 let _sql = null;
@@ -22,7 +22,72 @@ function sql() {
 }
 
 /* ================================================================== */
-/*  Telegram API                                                      */
+/*  ensureDatabase — idempotent, race-safe, cached per container      */
+/* ================================================================== */
+
+let _initPromise = null;
+
+function ensureDatabase() {
+  if (_initPromise) return _initPromise;
+  _initPromise = doInit().catch((e) => {
+    // اگر خطا خورد، promise را ریست کن تا درخواست بعدی دوباره تلاش کند
+    _initPromise = null;
+    throw e;
+  });
+  return _initPromise;
+}
+
+async function doInit() {
+  const db = sql();
+
+  const statements = [
+    // ----- daily_scores -----
+    `CREATE TABLE IF NOT EXISTS public.daily_scores (
+       chat_id   BIGINT  NOT NULL,
+       user_id   BIGINT  NOT NULL,
+       user_name TEXT    NOT NULL,
+       day       DATE    NOT NULL,
+       score     INTEGER NOT NULL DEFAULT 0,
+       PRIMARY KEY (chat_id, user_id, day)
+     )`,
+    `CREATE INDEX IF NOT EXISTS daily_scores_chat_day_score_idx
+       ON public.daily_scores (chat_id, day, score DESC)`,
+    `CREATE INDEX IF NOT EXISTS daily_scores_chat_user_day_idx
+       ON public.daily_scores (chat_id, user_id, day)`,
+
+    // ----- leaderboards -----
+    `CREATE TABLE IF NOT EXISTS public.leaderboards (
+       chat_id    BIGINT      PRIMARY KEY,
+       message_id BIGINT      NOT NULL,
+       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+     )`
+
+    // توجه: public.processed_updates از قبل وجود دارد؛
+    // دستور ساخت آن عمداً اینجا نیست تا طبق درخواست شما دست نخورد.
+  ];
+
+  for (const stmt of statements) {
+    try {
+      await db.query(stmt);
+    } catch (e) {
+      const msg = String(e?.message || "");
+      // خطاهای رقابتی بین containerها را نادیده بگیر
+      if (
+        /already exists/i.test(msg) ||
+        /duplicate key value violates unique constraint/i.test(msg) ||
+        /pg_class_relname_nsp_index/i.test(msg)
+      ) {
+        continue;
+      }
+      console.error("[db-init] DDL failed:", msg, "| stmt:", stmt.slice(0, 80));
+      throw e;
+    }
+  }
+  console.log("[db-init] schema ready");
+}
+
+/* ================================================================== */
+/*  Telegram API helper                                               */
 /* ================================================================== */
 
 async function tg(method, payload) {
@@ -39,39 +104,46 @@ async function tg(method, payload) {
     data = { ok: false, description: "invalid-json-from-telegram" };
   }
   if (!data.ok) {
-    // هیچ توکنی log نمی‌شود، فقط description
+    // هیچ توکنی log نمی‌شود
     console.warn(`[tg] ${method} failed: ${data.description || res.status}`);
   }
   return data;
 }
 
 /* ================================================================== */
-/*  Text normalization                                                */
+/*  Normalization & keyword matching                                  */
 /* ================================================================== */
 
-function normalize(text) {
-  if (text == null) return "";
-  return String(text)
-    // 1) حذف zero-width / bidi marks
-    .replace(/[\u200B\u200C\u200D\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
-    // 2) تبدیل تمام فضای‌های Unicode به space معمولی
+function normalizeText(input) {
+  if (input == null) return "";
+  return String(input)
+    // zero-width و bidi marks (شامل ZWNJ U+200C و ZWJ U+200D)
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
+    // همه‌ی فاصله‌های Unicode (شامل NBSP U+00A0) → space معمولی
     .replace(/[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+/g, " ")
-    // 3) یکسان‌سازی حروف عربی با فارسی (ک و ی)
+    // یکسان‌سازی ک و ی عربی با فارسی
     .replace(/\u0643/g, "\u06A9") // ك → ک
     .replace(/\u064A/g, "\u06CC") // ي → ی
     .trim();
 }
 
+// فرم نرمال‌شده‌ی keywordها (یک‌بار محاسبه می‌شود)
 const NORMALIZED_KEYWORDS = cfg.keywords
-  .map((kw) => normalize(kw))
+  .map((kw) => normalizeText(kw))
   .filter(Boolean)
   .map((spaced) => ({
     spaced,
     compact: spaced.replace(/ /g, "")
   }));
 
+/**
+ * تشخیص دقیق دو keyword معتبر.
+ * - variantهای spaced و compact هر دو پشتیبانی می‌شوند.
+ * - substring matching فقط روی فرم نرمال‌شده انجام می‌شود،
+ *   بنابراین "خ م ک" و "کمح" و "ک م ک" match نمی‌شوند.
+ */
 function matchesKeyword(text) {
-  const n = normalize(text);
+  const n = normalizeText(text);
   if (!n) return null;
   const c = n.replace(/ /g, "");
   for (const kw of NORMALIZED_KEYWORDS) {
@@ -119,7 +191,7 @@ function displayName(from) {
 }
 
 /* ================================================================== */
-/*  Bot username / setMyCommands                                      */
+/*  Bot username / setMyCommands (cached per container)               */
 /* ================================================================== */
 
 let _botUsername = null;
@@ -177,9 +249,10 @@ function formatLeaderboard(daily, weekly) {
 
 async function fetchLeaderboardRows(chatId) {
   const db = sql();
+  // نتیجه neon serverless مستقیماً Array است، نه { rows }
   const daily = await db`
     SELECT user_name, score
-    FROM daily_scores
+    FROM public.daily_scores
     WHERE chat_id = ${chatId}
       AND day = ${todayUTC()}::date
     ORDER BY score DESC, user_id ASC
@@ -187,14 +260,13 @@ async function fetchLeaderboardRows(chatId) {
   `;
   const weekly = await db`
     SELECT user_name, SUM(score)::int AS score
-    FROM daily_scores
+    FROM public.daily_scores
     WHERE chat_id = ${chatId}
       AND day >= ${weekStartUTC()}::date
     GROUP BY user_id, user_name
     ORDER BY score DESC, user_id ASC
     LIMIT 3
   `;
-  // توجه: neon serverless نتیجه را مستقیماً Array برمی‌گرداند
   return { daily, weekly };
 }
 
@@ -208,7 +280,7 @@ async function sendAndStoreLeaderboard(chatId, text) {
   if (!r.ok) return;
   const db = sql();
   await db`
-    INSERT INTO leaderboards (chat_id, message_id)
+    INSERT INTO public.leaderboards (chat_id, message_id)
     VALUES (${chatId}, ${r.result.message_id})
     ON CONFLICT (chat_id) DO UPDATE
       SET message_id = EXCLUDED.message_id,
@@ -230,7 +302,7 @@ async function updateLeaderboard(chatId) {
   let existing;
   try {
     existing = await db`
-      SELECT message_id FROM leaderboards WHERE chat_id = ${chatId}
+      SELECT message_id FROM public.leaderboards WHERE chat_id = ${chatId}
     `;
   } catch (e) {
     console.error("[leaderboard] lookup failed:", e?.message);
@@ -290,21 +362,21 @@ async function replyTops(chatId, replyTo) {
 async function replyScore(chatId, from, replyTo) {
   const db = sql();
   const todayRows = await db`
-    SELECT score FROM daily_scores
+    SELECT score FROM public.daily_scores
     WHERE chat_id = ${chatId}
       AND user_id = ${from.id}
       AND day = ${todayUTC()}::date
   `;
   const weekRows = await db`
     SELECT COALESCE(SUM(score), 0)::int AS score
-    FROM daily_scores
+    FROM public.daily_scores
     WHERE chat_id = ${chatId}
       AND user_id = ${from.id}
       AND day >= ${weekStartUTC()}::date
   `;
   const totalRows = await db`
     SELECT COALESCE(SUM(score), 0)::int AS score
-    FROM daily_scores
+    FROM public.daily_scores
     WHERE chat_id = ${chatId}
       AND user_id = ${from.id}
   `;
@@ -328,20 +400,16 @@ async function replyScore(chatId, from, replyTo) {
   });
 }
 
-/* ================================================================== */
-/*  Command parsing                                                   */
-/* ================================================================== */
-
 async function handleCommand(message) {
   const text = typeof message.text === "string" ? message.text : "";
   const chat = message.chat;
   const from = message.from;
   if (!chat || !from) return false;
 
-  // اولین توکن قبل از هر whitespace
   const first = text.split(/\s+/)[0] || "";
-  // /cmd یا /cmd@username
-  const m = first.match(/^\/([^\s@]+)(?:@(\S+))?$/);
+  // پشتیبانی از /cmd و /cmd@username
+  // فقط حروف/عدد/آندرلاین فارسی و لاتین مجازند (نه کاما و نقطه)
+  const m = first.match(/^\/([a-zA-Z0-9_\u0600-\u06FF]+)(?:@([a-zA-Z0-9_]+))?/);
   if (!m) return false;
 
   const cmd = m[1].toLowerCase();
@@ -414,7 +482,7 @@ async function handleMessage(message) {
 
   const text = typeof message.text === "string" ? message.text : "";
 
-  // 1) دستورات — هم در private و هم در گروه
+  // 1) دستورات — هم private و هم گروه
   if (text.startsWith("/")) {
     try {
       const handled = await handleCommand(message);
@@ -433,32 +501,26 @@ async function handleMessage(message) {
   const kw = matchesKeyword(text);
   if (!kw) return;
 
-  // 4) insert / upsert
+  // 4) insert/upsert — خطا در این مرحله باید propagate شود
+  //    تا dedup rollback شود و Telegram retry کند.
   const db = sql();
   const userName = displayName(from);
-  try {
-    await db`
-      INSERT INTO daily_scores (chat_id, user_id, user_name, day, score)
-      VALUES (${chat.id}, ${from.id}, ${userName}, ${todayUTC()}::date, ${cfg.pointsPerMessage})
-      ON CONFLICT (chat_id, user_id, day)
-      DO UPDATE SET score     = daily_scores.score + ${cfg.pointsPerMessage},
-                    user_name = EXCLUDED.user_name
-    `;
-    console.log(
-      `[score] +${cfg.pointsPerMessage} chat=${chat.id} user=${from.id} kw="${kw}"`
-    );
-  } catch (e) {
-    console.error("[score] insert failed:", e?.message);
-    // اجازه بده به لایه‌ی بالا برسد تا dedup پاک شود و Telegram retry کند
-    throw e;
-  }
+  await db`
+    INSERT INTO public.daily_scores (chat_id, user_id, user_name, day, score)
+    VALUES (${chat.id}, ${from.id}, ${userName}, ${todayUTC()}::date, ${cfg.pointsPerMessage})
+    ON CONFLICT (chat_id, user_id, day)
+    DO UPDATE SET score     = public.daily_scores.score + ${cfg.pointsPerMessage},
+                  user_name = EXCLUDED.user_name
+  `;
+  console.log(
+    `[score] +${cfg.pointsPerMessage} chat=${chat.id} user=${from.id} kw="${kw}"`
+  );
 
-  // 5) leaderboard
+  // 5) leaderboard (non-critical — خطا متوقف نمی‌کند)
   try {
     await updateLeaderboard(chat.id);
   } catch (e) {
     console.error("[leaderboard] update failed:", e?.message);
-    // leaderboard خطا نگیرد کل update را retry نمی‌کنیم
   }
 }
 
@@ -544,47 +606,53 @@ function logUpdate(update) {
 async function processUpdate(update) {
   if (!update || typeof update !== "object") return;
 
-  // ---- dedup ----
-  // اگر insert موفق شد => پردازش
-  // اگر conflict خورد => skip
-  // در صورت خطا در ادامه، dedup پاک می‌شود تا Telegram retry کند.
-  let insertedId = null;
+  // ---------- 1) اطمینان از وجود جداول ----------
+  // این خط دقیقاً همان چیزی است که خطای relation does not exist را رفع می‌کند.
+  await ensureDatabase();
+
+  // ---------- 2) dedup ----------
+  let dedupInserted = false;
   if (typeof update.update_id === "number") {
     try {
       const db = sql();
       const rows = await db`
-        INSERT INTO processed_updates (update_id)
+        INSERT INTO public.processed_updates (update_id)
         VALUES (${update.update_id})
         ON CONFLICT (update_id) DO NOTHING
         RETURNING update_id
       `;
-      if (rows.length === 0) {
+      if (!rows || rows.length === 0) {
         console.log(`[dedup] skip update_id=${update.update_id}`);
         return;
       }
-      insertedId = update.update_id;
+      dedupInserted = true;
     } catch (e) {
-      console.error("[dedup] insert failed:", e?.message);
-      // بدون dedup ادامه نمی‌دهیم؛ اجازه بده Telegram retry کند
-      throw e;
+      // اگر جدول موجود نبود، خطا را log می‌کنیم ولی پردازش را ادامه می‌دهیم
+      console.warn("[dedup] insert failed (continuing):", e?.message);
     }
   }
 
+  // ---------- 3) dispatch ----------
   try {
-    // register commands (idempotent, per container)
     try { await ensureCommands(); }
     catch (e) { console.error("[ensureCommands]", e?.message); }
 
-    if (update.message)        { await handleMessage(update.message);        return; }
-    if (update.my_chat_member) { await handleMyChatMember(update.my_chat_member); return; }
+    if (update.message) {
+      await handleMessage(update.message);
+      return;
+    }
+    if (update.my_chat_member) {
+      await handleMyChatMember(update.my_chat_member);
+      return;
+    }
     // بقیه انواع Update نادیده گرفته می‌شوند
   } catch (e) {
-    // خطا → dedup را پاک کن تا Telegram retry کند
-    if (insertedId != null) {
+    // خطا → dedup را پاک کن تا Telegram retry کند و امتیاز از دست نرود
+    if (dedupInserted) {
       try {
         const db = sql();
-        await db`DELETE FROM processed_updates WHERE update_id = ${insertedId}`;
-        console.warn(`[dedup] rolled back update_id=${insertedId}`);
+        await db`DELETE FROM public.processed_updates WHERE update_id = ${update.update_id}`;
+        console.warn(`[dedup] rolled back update_id=${update.update_id}`);
       } catch (e2) {
         console.error("[dedup] rollback failed:", e2?.message);
       }
@@ -605,11 +673,11 @@ export default async function handler(req, res) {
 
   if (!BOT_TOKEN || !DATABASE_URL) {
     console.error("[env] missing BOT_TOKEN or DATABASE_URL");
-    // به Telegram بگو موفق بود تا retry بی‌فایده نکند
+    // 200 می‌دهیم تا Telegram retry نبی‌فایده نکند
     return res.status(200).json({ ok: true });
   }
 
-  // parse body (Vercel معمولاً object می‌دهد، ولی هر دو حالت را پوشش می‌دهیم)
+  // parse body
   let update = null;
   try {
     update = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || null);
@@ -622,15 +690,16 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
-  // Log
-  try { logUpdate(update); } catch (e) { console.error("[logUpdate]", e?.message); }
+  // log update
+  try { logUpdate(update); }
+  catch (e) { console.error("[logUpdate]", e?.message); }
 
   // IMPORTANT: پردازش را کامل await کن، بعد پاسخ بده
   try {
     await processUpdate(update);
   } catch (e) {
     console.error("[webhook] fatal:", e?.message, e?.stack);
-    // 500 می‌دهیم تا Telegram retry کند (چون dedup هم rollback شده)
+    // dedup rollback شده، پس retry امن است
     return res.status(500).json({ ok: false });
   }
 
