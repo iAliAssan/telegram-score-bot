@@ -170,7 +170,7 @@ async function updateLeaderboard(chatId) {
     WHERE chat_id = ${chatId}
   `;
 
-  const messageId = result.rows[0]?.leaderboard_message_id;
+  const messageId = result[0]?.leaderboard_message_id;
 
   if (messageId) {
     const edited = await tg("editMessageText", {
@@ -343,7 +343,7 @@ export default async function handler(req, res) {
         RETURNING update_id
       `;
 
-      if (!inserted.rows.length) {
+      if (!inserted.length) {
         return res.status(200).send("OK");
       }
     }
