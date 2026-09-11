@@ -5,10 +5,10 @@
 ## پیش‌نیاز
 - اکانت Vercel
 - دیتابیس Neon (free tier کافی است)
-- بات تلگرام (از BotFather)
+- بات تلگرام از BotFather با username مثلاً `kmkhscorebot`
 
-## 1) نصب
+## نصب محلی
 ```bash
-git clone https://github.com/iAliAssan/telegram-score-bot
+git clone <repo>
 cd telegram-score-bot
 npm install
