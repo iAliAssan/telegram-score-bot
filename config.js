@@ -16,7 +16,7 @@ export default {
 
   pointsPerMessage: 1,
 
-  botUsername: "kmkhscorebot",
+  botUsername: "CMKHbot",
 
   // ============ متن‌های رابط کاربری ============
 
